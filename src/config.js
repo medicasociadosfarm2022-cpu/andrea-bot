@@ -25,6 +25,10 @@ export const config = {
   // tratamiento/receta y la conversación pasa a atención humana. Por defecto 24 h.
   pauseMs: parseInt(process.env.PAUSE_HOURS || '24', 10) * 60 * 60 * 1000,
 
+  // Horas que Andrea queda en pausa cuando un HUMANO responde manualmente desde
+  // el mismo WhatsApp del consultorio. Por defecto 12 h.
+  humanPauseMs: parseInt(process.env.HUMAN_PAUSE_HOURS || '12', 10) * 60 * 60 * 1000,
+
   evolution: {
     url: required('EVOLUTION_API_URL').replace(/\/+$/, ''),
     apiKey: required('EVOLUTION_API_KEY'),

@@ -48,6 +48,41 @@ function pideReceta(texto) {
 // sola vez, leyendo todo en conjunto.
 const buffers = new Map() // remoteJid -> { number, pushName, texts, adjuntos, timer }
 
+// Registro de los mensajes que envía el PROPIO bot (vía API), para distinguirlos
+// de los que escribe un humano a mano desde el mismo WhatsApp. Ambos llegan como
+// "fromMe", pero solo los del bot quedan aquí. Se limpia por antigüedad y tamaño.
+const botSent = [] // { id, number, text, at }
+const BOT_SENT_MAX = 1000
+const BOT_SENT_TTL_MS = 2 * 60 * 1000
+
+// Recuerda el contenido de un mensaje saliente del bot (antes de enviarlo).
+function recordarTextoBot(number, text) {
+  botSent.push({ id: null, number, text, at: Date.now() })
+  const corte = Date.now() - BOT_SENT_TTL_MS
+  while (botSent.length && botSent[0].at < corte) botSent.shift()
+  while (botSent.length > BOT_SENT_MAX) botSent.shift()
+}
+
+// ¿Este mensaje saliente ("fromMe") lo generó el propio bot?
+function esMensajeDelBot(number, text, id) {
+  return botSent.some(
+    (m) => (id && m.id === id) || (m.number === number && m.text === text),
+  )
+}
+
+// Envía un texto y lo registra como mensaje del bot (para no confundirlo con
+// una respuesta humana). Úsalo en lugar de sendText para todo lo que envía Andrea.
+async function enviar(number, text) {
+  recordarTextoBot(number, text)
+  const res = await sendText(number, text)
+  const id = res?.key?.id
+  if (id) {
+    const ultimo = botSent[botSent.length - 1]
+    if (ultimo) ultimo.id = id
+  }
+  return res
+}
+
 // Extrae el texto de los distintos tipos de mensaje de WhatsApp.
 function extractText(message) {
   if (!message) return null
@@ -79,7 +114,7 @@ async function notificarHumano(pushName, number, motivo) {
     `Motivo: ${motivo}\n\n` +
     `Por favor, comuníquese con el paciente.`
   try {
-    await sendText(destino, aviso)
+    await enviar(destino, aviso)
   } catch (err) {
     console.error('⚠️  No se pudo notificar al Dr. Maraví:', err.message)
   }
@@ -95,14 +130,29 @@ export async function handleIncoming(payload) {
   const data = payload?.data
   if (!data?.key) return
 
-  const { remoteJid, fromMe } = data.key
-  if (fromMe) return // ignorar lo que el propio número envía
+  const { remoteJid, fromMe, id: msgId } = data.key
   if (!remoteJid) return
   if (remoteJid.endsWith('@g.us')) return // ignorar grupos
   if (remoteJid === 'status@broadcast') return // ignorar estados
 
   const number = remoteJid.split('@')[0]
   const pushName = data.pushName || null
+
+  // Mensaje saliente (fromMe): puede ser del propio bot o de un humano del
+  // consultorio respondiendo a mano desde el mismo WhatsApp.
+  if (fromMe) {
+    const text = extractText(data.message)
+    if (esMensajeDelBot(number, text, msgId)) return // lo envió Andrea (API)
+    if (number === config.handoffNumber) return // notificación interna al Dr.
+    // Lo escribió un humano -> Andrea se pausa en esa conversación 12 h.
+    const pend = buffers.get(remoteJid)
+    if (pend?.timer) clearTimeout(pend.timer)
+    buffers.delete(remoteJid)
+    const hasta = new Date(Date.now() + config.humanPauseMs).toISOString()
+    await pauseChat(remoteJid, hasta, 'un humano respondió manualmente')
+    console.log(`👤 Humano respondió a ${number} -> Andrea en pausa ${config.humanPauseMs / 3600000} h`)
+    return
+  }
 
   // No responder al propio número de derivación (Dr. Maraví).
   if (number === config.handoffNumber) return
@@ -128,7 +178,7 @@ export async function handleIncoming(payload) {
     const hasta = new Date(Date.now() + config.pauseMs).toISOString()
     await pauseChat(remoteJid, hasta, 'pidió tratamiento/receta/pastillas')
     try {
-      await sendText(number, AVISO_RECETA)
+      await enviar(number, AVISO_RECETA)
       await notificarHumano(
         pushName,
         number,
@@ -180,7 +230,7 @@ async function flushBuffer(remoteJid, buf) {
     const tipos = [...new Set(adjuntos)].join(' y ')
     const textoExtra = texts.length ? ` y escribió: "${texts.join(' ')}"` : ''
     try {
-      await sendText(number, AVISO_ADJUNTO)
+      await enviar(number, AVISO_ADJUNTO)
       await notificarHumano(pushName, number, `envió ${tipos}${textoExtra}`)
       await saveMessage(remoteJid, 'user', `[Paciente envió ${tipos}]${texts.length ? ' ' + texts.join(' ') : ''}`, pushName)
       await saveMessage(remoteJid, 'assistant', AVISO_ADJUNTO)
@@ -210,7 +260,7 @@ async function flushBuffer(remoteJid, buf) {
       reply = reply.split(HANDOFF_TAG).join('').trim()
     }
 
-    await sendText(number, reply)
+    await enviar(number, reply)
     await saveMessage(remoteJid, 'user', combinado, pushName)
     await saveMessage(remoteJid, 'assistant', reply)
 
