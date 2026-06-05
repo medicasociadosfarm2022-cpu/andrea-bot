@@ -17,6 +17,10 @@ export const config = {
   // atención humana: el paciente envía archivos/fotos o pide reevaluar resultados.
   handoffNumber: (process.env.HANDOFF_NUMBER || '51978317597').trim(),
 
+  // Tiempo (ms) que Andrea espera tras el ÚLTIMO mensaje del paciente para
+  // agrupar todos sus mensajes y responder una sola vez. Por defecto 60 s.
+  batchWindowMs: parseInt(process.env.BATCH_WINDOW_MS || '60000', 10),
+
   evolution: {
     url: required('EVOLUTION_API_URL').replace(/\/+$/, ''),
     apiKey: required('EVOLUTION_API_KEY'),

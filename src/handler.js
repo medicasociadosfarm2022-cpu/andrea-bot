@@ -12,6 +12,11 @@ const HANDOFF_TAG = '[DERIVAR]'
 const AVISO_ADJUNTO =
   'Gracias por compartir su información 🙏. Le haré llegar su mensaje y sus archivos al Dr. Maraví para que los revise personalmente. Cuando el Dr. me responda, se lo haré saber.'
 
+// Buffer de mensajes por contacto. Andrea junta todos los mensajes que el
+// paciente envía y espera `batchWindowMs` desde el último para responder una
+// sola vez, leyendo todo en conjunto.
+const buffers = new Map() // remoteJid -> { number, pushName, texts, adjuntos, timer }
+
 // Extrae el texto de los distintos tipos de mensaje de WhatsApp.
 function extractText(message) {
   if (!message) return null
@@ -49,7 +54,8 @@ async function notificarHumano(pushName, number, motivo) {
   }
 }
 
-// Procesa un evento entrante de Evolution API.
+// Procesa un evento entrante de Evolution API: lo agrega al buffer del contacto
+// y reinicia el temporizador. La respuesta se genera al vaciar el buffer.
 export async function handleIncoming(payload) {
   // Evolution puede mandar el evento como "messages.upsert" o "messages-upsert".
   const event = (payload?.event || '').replace('-', '.')
@@ -67,37 +73,71 @@ export async function handleIncoming(payload) {
   const number = remoteJid.split('@')[0]
   const pushName = data.pushName || null
 
-  // No responder al propio número de derivación (Dr. Maraví), para no
-  // generar conversaciones automáticas con él.
+  // No responder al propio número de derivación (Dr. Maraví).
   if (number === config.handoffNumber) return
 
-  // 1) Adjuntos (PDF, fotos, documentos) -> derivar al Dr. Maraví.
   const adjunto = detectarAdjunto(data.message)
+  const text = adjunto ? null : extractText(data.message)
+  if (!adjunto && !text) return // mensajes sin texto ni adjunto (audios, stickers, etc.)
+
+  // Agregar al buffer del contacto.
+  let buf = buffers.get(remoteJid)
+  if (!buf) {
+    buf = { number, pushName, texts: [], adjuntos: [], timer: null }
+    buffers.set(remoteJid, buf)
+  }
+  buf.pushName = pushName || buf.pushName
   if (adjunto) {
-    console.log(`📎 ${pushName || number} envió ${adjunto} -> derivando al Dr. Maraví`)
+    buf.adjuntos.push(adjunto)
+    console.log(`📎 (agrupando) ${pushName || number}: ${adjunto}`)
+  } else {
+    buf.texts.push(text)
+    console.log(`📩 (agrupando) ${pushName || number}: ${text}`)
+  }
+
+  // Reiniciar el temporizador: respondemos 60 s después del ÚLTIMO mensaje.
+  if (buf.timer) clearTimeout(buf.timer)
+  buf.timer = setTimeout(() => {
+    buffers.delete(remoteJid)
+    flushBuffer(remoteJid, buf).catch((err) =>
+      console.error('❌ Error procesando el lote de mensajes:', err.message),
+    )
+  }, config.batchWindowMs)
+}
+
+// Procesa todos los mensajes agrupados de un contacto y responde una sola vez.
+async function flushBuffer(remoteJid, buf) {
+  const { number, pushName, texts, adjuntos } = buf
+
+  // 1) Si envió algún adjunto (foto/PDF) -> derivar al Dr. Maraví (un solo aviso).
+  if (adjuntos.length) {
+    const tipos = [...new Set(adjuntos)].join(' y ')
+    const textoExtra = texts.length ? ` y escribió: "${texts.join(' ')}"` : ''
     try {
       await sendText(number, AVISO_ADJUNTO)
-      await notificarHumano(pushName, number, `envió ${adjunto}`)
-      await saveMessage(remoteJid, 'user', `[Paciente envió ${adjunto}]`, pushName)
+      await notificarHumano(pushName, number, `envió ${tipos}${textoExtra}`)
+      await saveMessage(remoteJid, 'user', `[Paciente envió ${tipos}]${texts.length ? ' ' + texts.join(' ') : ''}`, pushName)
       await saveMessage(remoteJid, 'assistant', AVISO_ADJUNTO)
+      console.log(`📎 ${pushName || number}: ${tipos} -> derivado al Dr. Maraví`)
     } catch (err) {
       console.error('❌ Error derivando adjunto:', err.message)
     }
     return
   }
 
-  const text = extractText(data.message)
-  if (!text) return // mensajes sin texto (audios, stickers, etc.)
+  // 2) Solo texto -> juntar todo y responder una vez.
+  const combinado = texts.join('\n')
+  if (!combinado) return
 
-  console.log(`📩 ${pushName || number}: ${text}`)
+  console.log(`📩 ${pushName || number} (${texts.length} msj): ${combinado.replace(/\n/g, ' / ')}`)
 
   try {
     const history = await getHistory(remoteJid)
-    let reply = await generateReply(history, text)
+    let reply = await generateReply(history, combinado)
     if (!reply) return
 
-    // 2) Si el modelo marcó derivación (reevaluación de resultados),
-    //    quitamos la marca y avisamos al Dr. Maraví.
+    // Si el modelo marcó derivación (reevaluación de resultados),
+    // quitamos la marca y avisamos al Dr. Maraví.
     let derivar = false
     if (reply.includes(HANDOFF_TAG)) {
       derivar = true
@@ -105,13 +145,13 @@ export async function handleIncoming(payload) {
     }
 
     await sendText(number, reply)
-    await saveMessage(remoteJid, 'user', text, pushName)
+    await saveMessage(remoteJid, 'user', combinado, pushName)
     await saveMessage(remoteJid, 'assistant', reply)
 
     console.log(`🤖 Andrea → ${pushName || number}: ${reply}`)
 
     if (derivar) {
-      await notificarHumano(pushName, number, `pidió reevaluación de resultados: "${text}"`)
+      await notificarHumano(pushName, number, `pidió reevaluación de resultados: "${combinado}"`)
       console.log(`🔔 Derivado al Dr. Maraví: ${pushName || number}`)
     }
   } catch (err) {
