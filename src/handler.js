@@ -8,6 +8,10 @@ import { config } from './config.js'
 // antes de enviar el mensaje al paciente.
 const HANDOFF_TAG = '[DERIVAR]'
 
+// Marca que el modelo añade cuando ya derivó al paciente a la encargada de
+// citas (la cita está en proceso). Sirve para NO enviarle el recontacto.
+const CITA_TAG = '[CITA]'
+
 // Mensaje fijo que Andrea envía al paciente cuando comparte archivos o fotos.
 const AVISO_ADJUNTO =
   'Gracias por compartir su información 🙏. Le haré llegar su mensaje y sus archivos al Dr. Maraví para que los revise personalmente. Cuando el Dr. me responda, se lo haré saber.'
@@ -25,6 +29,11 @@ const MENSAJE_REDES =
   '🎵 TikTok: https://www.tiktok.com/@dr.juliomaravi.gastro\n' +
   '👍 Facebook: https://www.facebook.com/Dr.JulioMaraviCoronado/\n\n' +
   '¡Que tenga un excelente día! 🙌'
+
+// Mensaje de recontacto que se envía 25 min después, si el paciente quedó sin
+// responder y aún NO concretó su cita.
+const MENSAJE_RECONTACTO =
+  'Hola 😊, ¿sigue interesado/a en agendar su cita con el Dr. Maraví? Con gusto le ayudo a reservar su horario o a resolver cualquier duda que tenga. Quedo atenta. 🙌'
 
 // Frases que activan la atención humana (el paciente pide medicación/receta).
 // Se comparan sin tildes y en minúsculas, como subcadena del mensaje.
@@ -61,9 +70,17 @@ const buffers = new Map() // remoteJid -> { number, pushName, texts, adjuntos, t
 // con cada interacción y disparan `followUpMs` después de la última.
 const followUps = new Map() // remoteJid -> Timeout
 
-// Programa (o reinicia) el mensaje de seguimiento para un contacto.
+// Temporizadores de recontacto (si no concretó la cita) por contacto.
+const recontacts = new Map() // remoteJid -> Timeout
+
+// Conversaciones donde el paciente ya concretó/derivó su cita; no se les
+// envía el mensaje de recontacto.
+const citasConcertadas = new Set() // remoteJid
+
+// Programa (o reinicia) el mensaje de seguimiento (redes) para un contacto.
 function programarSeguimiento(remoteJid, number) {
-  cancelarSeguimiento(remoteJid)
+  const prev = followUps.get(remoteJid)
+  if (prev) clearTimeout(prev)
   const t = setTimeout(() => {
     followUps.delete(remoteJid)
     enviarSeguimiento(remoteJid, number).catch((err) =>
@@ -73,11 +90,28 @@ function programarSeguimiento(remoteJid, number) {
   followUps.set(remoteJid, t)
 }
 
-// Cancela un seguimiento pendiente (la conversación se reactivó o la tomó un humano).
-function cancelarSeguimiento(remoteJid) {
-  const t = followUps.get(remoteJid)
-  if (t) clearTimeout(t)
+// Programa (o reinicia) el mensaje de recontacto para un contacto.
+function programarRecontacto(remoteJid, number) {
+  const prev = recontacts.get(remoteJid)
+  if (prev) clearTimeout(prev)
+  const t = setTimeout(() => {
+    recontacts.delete(remoteJid)
+    enviarRecontacto(remoteJid, number).catch((err) =>
+      console.error('❌ Error enviando recontacto:', err.message),
+    )
+  }, config.recontactMs)
+  recontacts.set(remoteJid, t)
+}
+
+// Cancela los temporizadores pendientes de un contacto (la conversación se
+// reactivó o la tomó un humano).
+function cancelarTemporizadores(remoteJid) {
+  const f = followUps.get(remoteJid)
+  if (f) clearTimeout(f)
   followUps.delete(remoteJid)
+  const r = recontacts.get(remoteJid)
+  if (r) clearTimeout(r)
+  recontacts.delete(remoteJid)
 }
 
 // Envía el mensaje de redes sociales, salvo que la conversación esté en pausa.
@@ -86,6 +120,15 @@ async function enviarSeguimiento(remoteJid, number) {
   await enviar(number, MENSAJE_REDES)
   await saveMessage(remoteJid, 'assistant', MENSAJE_REDES)
   console.log(`📣 Seguimiento (redes) enviado a ${number}`)
+}
+
+// Envía el mensaje de recontacto si no hay cita concertada ni pausa activa.
+async function enviarRecontacto(remoteJid, number) {
+  if (citasConcertadas.has(remoteJid)) return // ya concretó la cita
+  if (await isPaused(remoteJid)) return // un humano la está atendiendo
+  await enviar(number, MENSAJE_RECONTACTO)
+  await saveMessage(remoteJid, 'assistant', MENSAJE_RECONTACTO)
+  console.log(`📨 Recontacto enviado a ${number}`)
 }
 
 // Registro de los mensajes que envía el PROPIO bot (vía API), para distinguirlos
@@ -188,7 +231,7 @@ export async function handleIncoming(payload) {
     const pend = buffers.get(remoteJid)
     if (pend?.timer) clearTimeout(pend.timer)
     buffers.delete(remoteJid)
-    cancelarSeguimiento(remoteJid)
+    cancelarTemporizadores(remoteJid)
     const hasta = new Date(Date.now() + config.humanPauseMs).toISOString()
     await pauseChat(remoteJid, hasta, 'un humano respondió manualmente')
     console.log(`👤 Humano respondió a ${number} -> Andrea en pausa ${config.humanPauseMs / 3600000} h`)
@@ -202,9 +245,9 @@ export async function handleIncoming(payload) {
   const text = adjunto ? null : extractText(data.message)
   if (!adjunto && !text) return // mensajes sin texto ni adjunto (audios, stickers, etc.)
 
-  // Hay actividad nueva del paciente: cancelar cualquier seguimiento pendiente
-  // (se reprogramará cuando Andrea responda).
-  cancelarSeguimiento(remoteJid)
+  // Hay actividad nueva del paciente: cancelar temporizadores pendientes
+  // (se reprogramarán cuando Andrea responda).
+  cancelarTemporizadores(remoteJid)
 
   // Si la conversación está en pausa (la atiende un humano), Andrea no responde.
   if (await isPaused(remoteJid)) {
@@ -305,6 +348,13 @@ async function flushBuffer(remoteJid, buf) {
       reply = reply.split(HANDOFF_TAG).join('').trim()
     }
 
+    // Si el modelo marcó que la cita ya está en proceso ([CITA]), la quitamos
+    // y registramos el contacto para no enviarle el recontacto.
+    if (reply.includes(CITA_TAG)) {
+      citasConcertadas.add(remoteJid)
+      reply = reply.split(CITA_TAG).join('').trim()
+    }
+
     await enviar(number, reply)
     await saveMessage(remoteJid, 'user', combinado, pushName)
     await saveMessage(remoteJid, 'assistant', reply)
@@ -315,9 +365,10 @@ async function flushBuffer(remoteJid, buf) {
       await notificarHumano(pushName, number, `pidió reevaluación de resultados: "${combinado}"`)
       console.log(`🔔 Derivado al Dr. Maraví: ${pushName || number}`)
     } else {
-      // Programar el mensaje de seguimiento (redes) 30 min después de esta
-      // respuesta, si el paciente no vuelve a escribir antes.
+      // Programar el seguimiento (redes) 30 min después de esta respuesta.
       programarSeguimiento(remoteJid, number)
+      // Y el recontacto a los 25 min, salvo que ya haya concretado la cita.
+      if (!citasConcertadas.has(remoteJid)) programarRecontacto(remoteJid, number)
     }
   } catch (err) {
     console.error('❌ Error procesando el mensaje:', err.message)

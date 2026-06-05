@@ -33,6 +33,10 @@ export const config = {
   // seguimiento invitando a seguir las redes del Dr. Por defecto 30 min.
   followUpMs: parseInt(process.env.FOLLOWUP_MINUTES || '30', 10) * 60 * 1000,
 
+  // Minutos de inactividad tras los cuales Andrea envía un mensaje de recontacto
+  // si el paciente NO concretó la cita. Por defecto 25 min.
+  recontactMs: parseInt(process.env.RECONTACT_MINUTES || '25', 10) * 60 * 1000,
+
   evolution: {
     url: required('EVOLUTION_API_URL').replace(/\/+$/, ''),
     apiKey: required('EVOLUTION_API_KEY'),
