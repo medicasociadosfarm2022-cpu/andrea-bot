@@ -13,6 +13,10 @@ export const config = {
   port: parseInt(process.env.PORT || '3000', 10),
   webhookToken: (process.env.WEBHOOK_TOKEN || '').trim(),
 
+  // Número (con código de país, SIN el +) al que se avisa cuando se requiere
+  // atención humana: el paciente envía archivos/fotos o pide reevaluar resultados.
+  handoffNumber: (process.env.HANDOFF_NUMBER || '51978317597').trim(),
+
   evolution: {
     url: required('EVOLUTION_API_URL').replace(/\/+$/, ''),
     apiKey: required('EVOLUTION_API_KEY'),
