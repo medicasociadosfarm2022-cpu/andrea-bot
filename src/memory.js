@@ -31,3 +31,28 @@ export async function saveMessage(remoteJid, role, content, pushName = null) {
   })
   if (error) console.error('⚠️  Error guardando mensaje en Supabase:', error.message)
 }
+
+// Pausa una conversación (Andrea deja de responder) hasta la fecha/hora `until`
+// (ISO). Lo usa cuando un paciente pide tratamiento/receta y un humano debe
+// atenderlo. Se guarda en Supabase para que sobreviva a reinicios.
+export async function pauseChat(remoteJid, until, reason = null) {
+  const { error } = await supabase
+    .from('paused_chats')
+    .upsert({ remote_jid: remoteJid, paused_until: until, reason }, { onConflict: 'remote_jid' })
+  if (error) console.error('⚠️  Error pausando conversación en Supabase:', error.message)
+}
+
+// Indica si la conversación está en pausa (un humano la está atendiendo).
+export async function isPaused(remoteJid) {
+  const { data, error } = await supabase
+    .from('paused_chats')
+    .select('paused_until')
+    .eq('remote_jid', remoteJid)
+    .maybeSingle()
+  if (error) {
+    console.error('⚠️  Error consultando pausa en Supabase:', error.message)
+    return false
+  }
+  if (!data) return false
+  return new Date(data.paused_until).getTime() > Date.now()
+}

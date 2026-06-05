@@ -13,3 +13,12 @@ create table if not exists messages (
 -- Índice para traer rápido el historial de cada contacto.
 create index if not exists messages_remote_jid_created_idx
   on messages (remote_jid, created_at desc);
+
+-- Conversaciones en pausa: cuando el paciente pide tratamiento/receta, Andrea
+-- deja de responder hasta `paused_until` para que un humano lo atienda.
+create table if not exists paused_chats (
+  remote_jid   text        primary key,                -- ej: 5199xxxxxxx@s.whatsapp.net
+  paused_until timestamptz not null,                   -- hasta cuándo Andrea no responde
+  reason       text,                                   -- motivo de la pausa
+  created_at   timestamptz not null default now()
+);

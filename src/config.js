@@ -21,6 +21,10 @@ export const config = {
   // agrupar todos sus mensajes y responder una sola vez. Por defecto 60 s.
   batchWindowMs: parseInt(process.env.BATCH_WINDOW_MS || '60000', 10),
 
+  // Horas que Andrea queda en pausa (sin responder) cuando un paciente pide
+  // tratamiento/receta y la conversación pasa a atención humana. Por defecto 24 h.
+  pauseMs: parseInt(process.env.PAUSE_HOURS || '24', 10) * 60 * 60 * 1000,
+
   evolution: {
     url: required('EVOLUTION_API_URL').replace(/\/+$/, ''),
     apiKey: required('EVOLUTION_API_KEY'),

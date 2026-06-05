@@ -1,4 +1,4 @@
-import { getHistory, saveMessage } from './memory.js'
+import { getHistory, saveMessage, pauseChat, isPaused } from './memory.js'
 import { generateReply } from './openai.js'
 import { sendText } from './evolution.js'
 import { config } from './config.js'
@@ -11,6 +11,37 @@ const HANDOFF_TAG = '[DERIVAR]'
 // Mensaje fijo que Andrea envía al paciente cuando comparte archivos o fotos.
 const AVISO_ADJUNTO =
   'Gracias por compartir su información 🙏. Le haré llegar su mensaje y sus archivos al Dr. Maraví para que los revise personalmente. Cuando el Dr. me responda, se lo haré saber.'
+
+// Mensaje que Andrea envía cuando el paciente pide tratamiento/receta/pastillas.
+// Tras esto, Andrea queda en pausa y el personal del consultorio responde.
+const AVISO_RECETA =
+  'Con gusto. Para este tema le atenderá directamente el personal del consultorio del Dr. Maraví. En un momento se comunicarán con usted. 🙏'
+
+// Frases que activan la atención humana (el paciente pide medicación/receta).
+// Se comparan sin tildes y en minúsculas, como subcadena del mensaje.
+const TRIGGERS_RECETA = [
+  'envieme tratamiento', 'enviame tratamiento', 'envieme un tratamiento', 'enviame un tratamiento',
+  'envieme una receta', 'enviame una receta', 'envieme receta', 'enviame receta', 'envieme la receta',
+  'deme pastillas', 'dame pastillas', 'deme unas pastillas', 'dame unas pastillas',
+  'deme pastilla', 'dame pastilla',
+]
+
+// Normaliza un texto: minúsculas y sin tildes/acentos, para comparar frases.
+function normalizar(texto) {
+  return texto
+    .toLowerCase()
+    .replace(/[áàä]/g, 'a')
+    .replace(/[éèë]/g, 'e')
+    .replace(/[íìï]/g, 'i')
+    .replace(/[óòö]/g, 'o')
+    .replace(/[úùü]/g, 'u')
+}
+
+// ¿El paciente está pidiendo tratamiento, receta o pastillas?
+function pideReceta(texto) {
+  const t = normalizar(texto)
+  return TRIGGERS_RECETA.some((frase) => t.includes(frase))
+}
 
 // Buffer de mensajes por contacto. Andrea junta todos los mensajes que el
 // paciente envía y espera `batchWindowMs` desde el último para responder una
@@ -80,6 +111,38 @@ export async function handleIncoming(payload) {
   const text = adjunto ? null : extractText(data.message)
   if (!adjunto && !text) return // mensajes sin texto ni adjunto (audios, stickers, etc.)
 
+  // Si la conversación está en pausa (la atiende un humano), Andrea no responde.
+  if (await isPaused(remoteJid)) {
+    console.log(`🔕 (en pausa) ${pushName || number}: mensaje ignorado por Andrea`)
+    return
+  }
+
+  // Si el paciente pide tratamiento/receta/pastillas, Andrea deja de responder
+  // y deriva a atención humana (pausa de 24 h + aviso al Dr. Maraví).
+  if (text && pideReceta(text)) {
+    // Cancelar cualquier respuesta automática que estuviera pendiente.
+    const pend = buffers.get(remoteJid)
+    if (pend?.timer) clearTimeout(pend.timer)
+    buffers.delete(remoteJid)
+
+    const hasta = new Date(Date.now() + config.pauseMs).toISOString()
+    await pauseChat(remoteJid, hasta, 'pidió tratamiento/receta/pastillas')
+    try {
+      await sendText(number, AVISO_RECETA)
+      await notificarHumano(
+        pushName,
+        number,
+        `solicitó tratamiento/receta/pastillas: "${text}". Andrea quedó en pausa por atención humana.`,
+      )
+      await saveMessage(remoteJid, 'user', text, pushName)
+      await saveMessage(remoteJid, 'assistant', AVISO_RECETA)
+    } catch (err) {
+      console.error('❌ Error derivando solicitud de receta:', err.message)
+    }
+    console.log(`💊 ${pushName || number} pidió receta -> Andrea en pausa, derivado al Dr. Maraví`)
+    return
+  }
+
   // Agregar al buffer del contacto.
   let buf = buffers.get(remoteJid)
   if (!buf) {
@@ -108,6 +171,9 @@ export async function handleIncoming(payload) {
 // Procesa todos los mensajes agrupados de un contacto y responde una sola vez.
 async function flushBuffer(remoteJid, buf) {
   const { number, pushName, texts, adjuntos } = buf
+
+  // Si la conversación se pausó mientras había mensajes pendientes, no responder.
+  if (await isPaused(remoteJid)) return
 
   // 1) Si envió algún adjunto (foto/PDF) -> derivar al Dr. Maraví (un solo aviso).
   if (adjuntos.length) {
