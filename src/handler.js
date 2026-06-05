@@ -17,6 +17,15 @@ const AVISO_ADJUNTO =
 const AVISO_RECETA =
   'Con gusto. Para este tema le atenderá directamente el personal del consultorio del Dr. Maraví. En un momento se comunicarán con usted. 🙏'
 
+// Mensaje de seguimiento que se envía 30 min después de terminar la conversación,
+// invitando al paciente a seguir las redes sociales del Dr. Maraví.
+const MENSAJE_REDES =
+  '¡Gracias por escribirnos! 😊 Si desea conocer más sobre el Dr. Julio Maraví y sus consejos de salud digestiva, puede seguirlo en sus redes sociales:\n\n' +
+  '📸 Instagram: https://www.instagram.com/dr.juliomaravi.gastro/\n' +
+  '🎵 TikTok: https://www.tiktok.com/@dr.juliomaravi.gastro\n' +
+  '👍 Facebook: https://www.facebook.com/Dr.JulioMaraviCoronado/\n\n' +
+  '¡Que tenga un excelente día! 🙌'
+
 // Frases que activan la atención humana (el paciente pide medicación/receta).
 // Se comparan sin tildes y en minúsculas, como subcadena del mensaje.
 const TRIGGERS_RECETA = [
@@ -47,6 +56,37 @@ function pideReceta(texto) {
 // paciente envía y espera `batchWindowMs` desde el último para responder una
 // sola vez, leyendo todo en conjunto.
 const buffers = new Map() // remoteJid -> { number, pushName, texts, adjuntos, timer }
+
+// Temporizadores de seguimiento (mensaje de redes) por contacto. Se reinician
+// con cada interacción y disparan `followUpMs` después de la última.
+const followUps = new Map() // remoteJid -> Timeout
+
+// Programa (o reinicia) el mensaje de seguimiento para un contacto.
+function programarSeguimiento(remoteJid, number) {
+  cancelarSeguimiento(remoteJid)
+  const t = setTimeout(() => {
+    followUps.delete(remoteJid)
+    enviarSeguimiento(remoteJid, number).catch((err) =>
+      console.error('❌ Error enviando seguimiento:', err.message),
+    )
+  }, config.followUpMs)
+  followUps.set(remoteJid, t)
+}
+
+// Cancela un seguimiento pendiente (la conversación se reactivó o la tomó un humano).
+function cancelarSeguimiento(remoteJid) {
+  const t = followUps.get(remoteJid)
+  if (t) clearTimeout(t)
+  followUps.delete(remoteJid)
+}
+
+// Envía el mensaje de redes sociales, salvo que la conversación esté en pausa.
+async function enviarSeguimiento(remoteJid, number) {
+  if (await isPaused(remoteJid)) return // un humano la está atendiendo
+  await enviar(number, MENSAJE_REDES)
+  await saveMessage(remoteJid, 'assistant', MENSAJE_REDES)
+  console.log(`📣 Seguimiento (redes) enviado a ${number}`)
+}
 
 // Registro de los mensajes que envía el PROPIO bot (vía API), para distinguirlos
 // de los que escribe un humano a mano desde el mismo WhatsApp. Ambos llegan como
@@ -148,6 +188,7 @@ export async function handleIncoming(payload) {
     const pend = buffers.get(remoteJid)
     if (pend?.timer) clearTimeout(pend.timer)
     buffers.delete(remoteJid)
+    cancelarSeguimiento(remoteJid)
     const hasta = new Date(Date.now() + config.humanPauseMs).toISOString()
     await pauseChat(remoteJid, hasta, 'un humano respondió manualmente')
     console.log(`👤 Humano respondió a ${number} -> Andrea en pausa ${config.humanPauseMs / 3600000} h`)
@@ -160,6 +201,10 @@ export async function handleIncoming(payload) {
   const adjunto = detectarAdjunto(data.message)
   const text = adjunto ? null : extractText(data.message)
   if (!adjunto && !text) return // mensajes sin texto ni adjunto (audios, stickers, etc.)
+
+  // Hay actividad nueva del paciente: cancelar cualquier seguimiento pendiente
+  // (se reprogramará cuando Andrea responda).
+  cancelarSeguimiento(remoteJid)
 
   // Si la conversación está en pausa (la atiende un humano), Andrea no responde.
   if (await isPaused(remoteJid)) {
@@ -269,6 +314,10 @@ async function flushBuffer(remoteJid, buf) {
     if (derivar) {
       await notificarHumano(pushName, number, `pidió reevaluación de resultados: "${combinado}"`)
       console.log(`🔔 Derivado al Dr. Maraví: ${pushName || number}`)
+    } else {
+      // Programar el mensaje de seguimiento (redes) 30 min después de esta
+      // respuesta, si el paciente no vuelve a escribir antes.
+      programarSeguimiento(remoteJid, number)
     }
   } catch (err) {
     console.error('❌ Error procesando el mensaje:', err.message)

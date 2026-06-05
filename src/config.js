@@ -29,6 +29,10 @@ export const config = {
   // el mismo WhatsApp del consultorio. Por defecto 12 h.
   humanPauseMs: parseInt(process.env.HUMAN_PAUSE_HOURS || '12', 10) * 60 * 60 * 1000,
 
+  // Minutos de inactividad tras los cuales Andrea envía el mensaje de
+  // seguimiento invitando a seguir las redes del Dr. Por defecto 30 min.
+  followUpMs: parseInt(process.env.FOLLOWUP_MINUTES || '30', 10) * 60 * 1000,
+
   evolution: {
     url: required('EVOLUTION_API_URL').replace(/\/+$/, ''),
     apiKey: required('EVOLUTION_API_KEY'),
