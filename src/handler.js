@@ -10,7 +10,7 @@ const HANDOFF_TAG = '[DERIVAR]'
 
 // Mensaje fijo que Andrea envía al paciente cuando comparte archivos o fotos.
 const AVISO_ADJUNTO =
-  'Gracias por compartir su información 🙏. Le haré llegar su mensaje y sus archivos al Dr. Maraví para que los revise personalmente. En breve nos comunicaremos con usted.'
+  'Gracias por compartir su información 🙏. Le haré llegar su mensaje y sus archivos al Dr. Maraví para que los revise personalmente. Cuando el Dr. me responda, se lo haré saber.'
 
 // Extrae el texto de los distintos tipos de mensaje de WhatsApp.
 function extractText(message) {
