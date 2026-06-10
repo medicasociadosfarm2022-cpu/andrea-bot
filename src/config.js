@@ -17,6 +17,11 @@ export const config = {
   // atención humana: el paciente envía archivos/fotos o pide reevaluar resultados.
   handoffNumber: (process.env.HANDOFF_NUMBER || '51978317597').trim(),
 
+  // Número (con código de país, SIN el +) de la ENCARGADA DE CITAS. Cuando Andrea
+  // deriva a un paciente para agendar, se le envía un WhatsApp aquí para que una
+  // persona termine de coordinar la cita. Por defecto +51 941 697 769.
+  citasNumber: (process.env.CITAS_NUMBER || '51941697769').trim(),
+
   // Tiempo (ms) que Andrea espera tras el ÚLTIMO mensaje del paciente para
   // agrupar todos sus mensajes y responder una sola vez. Por defecto 60 s.
   batchWindowMs: parseInt(process.env.BATCH_WINDOW_MS || '60000', 10),

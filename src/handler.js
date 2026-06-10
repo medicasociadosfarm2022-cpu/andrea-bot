@@ -203,6 +203,24 @@ async function notificarHumano(pushName, number, motivo) {
   }
 }
 
+// Avisa por WhatsApp a la ENCARGADA DE CITAS cuando Andrea deriva a un paciente
+// para agendar, para que una persona termine de coordinar la cita.
+async function notificarEncargadaCitas(pushName, number) {
+  const destino = config.citasNumber
+  if (!destino) return
+  const aviso =
+    `🗓️ *Andrea — nueva cita por agendar*\n\n` +
+    `Un paciente fue derivado para coordinar su cita. Por favor, comuníquese con él para terminar de agendarla.\n\n` +
+    `Paciente: ${pushName || 'Sin nombre'}\n` +
+    `WhatsApp: +${number}`
+  try {
+    await enviar(destino, aviso)
+    console.log(`🗓️ Encargada de citas notificada para ${pushName || number}`)
+  } catch (err) {
+    console.error('⚠️  No se pudo notificar a la encargada de citas:', err.message)
+  }
+}
+
 // Procesa un evento entrante de Evolution API: lo agrega al buffer del contacto
 // y reinicia el temporizador. La respuesta se genera al vaciar el buffer.
 export async function handleIncoming(payload) {
@@ -227,6 +245,7 @@ export async function handleIncoming(payload) {
     const text = extractText(data.message)
     if (esMensajeDelBot(number, text, msgId)) return // lo envió Andrea (API)
     if (number === config.handoffNumber) return // notificación interna al Dr.
+    if (number === config.citasNumber) return // notificación a la encargada de citas
     // Lo escribió un humano -> Andrea se pausa en esa conversación 12 h.
     const pend = buffers.get(remoteJid)
     if (pend?.timer) clearTimeout(pend.timer)
@@ -238,8 +257,9 @@ export async function handleIncoming(payload) {
     return
   }
 
-  // No responder al propio número de derivación (Dr. Maraví).
+  // No responder al propio número de derivación (Dr. Maraví) ni al de la encargada.
   if (number === config.handoffNumber) return
+  if (number === config.citasNumber) return
 
   const adjunto = detectarAdjunto(data.message)
   const text = adjunto ? null : extractText(data.message)
@@ -348,9 +368,12 @@ async function flushBuffer(remoteJid, buf) {
       reply = reply.split(HANDOFF_TAG).join('').trim()
     }
 
-    // Si el modelo marcó que la cita ya está en proceso ([CITA]), la quitamos
-    // y registramos el contacto para no enviarle el recontacto.
+    // Si el modelo marcó que la cita ya está en proceso ([CITA]), la quitamos,
+    // registramos el contacto para no enviarle el recontacto y, tras responder
+    // al paciente, avisamos a la encargada de citas para que agende la cita.
+    let citaDerivada = false
     if (reply.includes(CITA_TAG)) {
+      citaDerivada = true
       citasConcertadas.add(remoteJid)
       reply = reply.split(CITA_TAG).join('').trim()
     }
@@ -360,6 +383,11 @@ async function flushBuffer(remoteJid, buf) {
     await saveMessage(remoteJid, 'assistant', reply)
 
     console.log(`🤖 Andrea → ${pushName || number}: ${reply}`)
+
+    // Tras enviar el mensaje de derivación, avisar SIEMPRE a la encargada de citas.
+    if (citaDerivada) {
+      await notificarEncargadaCitas(pushName, number)
+    }
 
     if (derivar) {
       await notificarHumano(pushName, number, `pidió reevaluación de resultados: "${combinado}"`)
