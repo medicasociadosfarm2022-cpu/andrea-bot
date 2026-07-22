@@ -16,7 +16,7 @@ const CITA_TAG = '[CITA]'
 // videos, archivos o enlaces. Tras esto Andrea queda en pausa y solo un humano
 // del consultorio continúa la conversación.
 const AVISO_ADJUNTO =
-  'Gracias por compartir su información 🙏. Le haré llegar su mensaje al Dr. Maraví para que lo revise personalmente. Una persona del consultorio se comunicará con usted. Cuando el Dr. me responda, se lo haré saber.'
+  'Gracias por compartir su información 🙏. Le haré llegar su mensaje al Dr. Maraví, cuando responda se lo haré saber.'
 
 // Mensaje que Andrea envía cuando el paciente pide tratamiento/receta/pastillas.
 // Tras esto, Andrea queda en pausa y el personal del consultorio responde.
