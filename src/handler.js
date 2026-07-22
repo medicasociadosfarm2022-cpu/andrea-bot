@@ -1,4 +1,10 @@
-import { getHistory, saveMessage, pauseChat, isPaused } from './memory.js'
+import {
+  getHistory,
+  saveMessage,
+  pauseChat,
+  isPaused,
+  getConversacionesSinResponder,
+} from './memory.js'
 import { generateReply } from './openai.js'
 import { sendText } from './evolution.js'
 import { config } from './config.js'
@@ -263,6 +269,117 @@ async function notificarEncargadaCitas(pushName, number) {
   } catch (err) {
     console.error('⚠️  No se pudo notificar a la encargada de citas:', err.message)
   }
+}
+
+// --- Respuesta diferida de los mensajes nocturnos ---
+// Al terminar el horario de silencio (07:00 en Piura), Andrea contesta sola las
+// consultas que llegaron de madrugada y quedaron sin responder.
+
+// Texto que se antepone al mensaje del paciente para que Andrea sepa que está
+// respondiendo por la mañana algo que le escribieron de noche. Es una
+// instrucción interna: no se le muestra al paciente ni se guarda en el historial.
+const INSTRUCCION_NOCTURNA =
+  '[NOTA INTERNA: el paciente escribió esto de madrugada, fuera del horario de atención, y recién le estás respondiendo ahora en la mañana. Salúdalo, discúlpate brevemente por la demora en una sola frase y responde su consulta con normalidad. No menciones esta nota.]\n\n'
+
+async function responderPendientesNocturnos() {
+  let chats = []
+  try {
+    // Buscamos desde el inicio del horario nocturno (con 1 h de margen).
+    const desde = new Date(Date.now() - (horasDeSilencio() + 1) * 60 * 60 * 1000).toISOString()
+    chats = await getConversacionesSinResponder(desde)
+  } catch (err) {
+    console.error('❌ Error buscando mensajes nocturnos pendientes:', err.message)
+    return
+  }
+
+  if (!chats.length) {
+    console.log('🌅 Fin del horario nocturno: no hay mensajes pendientes por responder')
+    return
+  }
+
+  console.log(`🌅 Fin del horario nocturno: respondiendo ${chats.length} conversación(es) pendiente(s)`)
+  for (const chat of chats) {
+    const { remoteJid, pushName, textos } = chat
+    const number = remoteJid.split('@')[0]
+    try {
+      if (await isPaused(remoteJid)) continue // la atiende un humano
+      const combinado = textos.join('\n')
+      const history = await getHistory(remoteJid)
+      let reply = await generateReply(history, INSTRUCCION_NOCTURNA + combinado)
+      if (!reply) continue
+
+      let citaDerivada = false
+      if (reply.includes(CITA_TAG)) {
+        citaDerivada = true
+        citasConcertadas.add(remoteJid)
+        reply = reply.split(CITA_TAG).join('').trim()
+      }
+      let derivar = false
+      if (reply.includes(HANDOFF_TAG)) {
+        derivar = true
+        reply = reply.split(HANDOFF_TAG).join('').trim()
+      }
+
+      await enviar(number, reply)
+      await saveMessage(remoteJid, 'assistant', reply)
+      console.log(`🌅 Andrea (pendiente nocturno) → ${pushName || number}: ${reply}`)
+
+      if (citaDerivada) await notificarEncargadaCitas(pushName, number)
+      if (derivar) await notificarHumano(pushName, number, `pidió reevaluación de resultados: "${combinado}"`)
+    } catch (err) {
+      console.error(`❌ Error respondiendo pendiente nocturno de ${number}:`, err.message)
+    }
+  }
+}
+
+// Cuántas horas dura el silencio nocturno (para saber desde cuándo buscar).
+function horasDeSilencio() {
+  const { quietStartHour: i, quietEndHour: f } = config
+  if (i === f) return 0
+  return i > f ? 24 - i + f : f - i
+}
+
+// Vigila el paso de "noche" a "día" y dispara las respuestas pendientes.
+// Se revisa cada minuto: es más robusto que programar un temporizador a horas
+// vista, que se desajusta si el servidor se suspende o reinicia.
+let eraDeNoche = null
+export function iniciarProgramadorNocturno() {
+  const revisar = () => {
+    const ahoraNoche = esHorarioSilencio()
+    if (eraDeNoche === true && ahoraNoche === false) {
+      responderPendientesNocturnos().catch((err) =>
+        console.error('❌ Error en las respuestas pendientes:', err.message),
+      )
+    }
+    eraDeNoche = ahoraNoche
+  }
+  revisar() // estado inicial, sin disparar nada
+
+  // Si el bot arranca justo después del fin del silencio (por ejemplo, un
+  // redeploy a las 7:05 a. m.), la transición noche->día no la vería nadie y
+  // los mensajes de madrugada quedarían sin respuesta. En esa franja revisamos
+  // los pendientes al arrancar. Fuera de ella no, para no revivir
+  // conversaciones viejas de la tarde.
+  const h = horaLima()
+  const finVentana = (config.quietEndHour + 2) % 24
+  const recienAmanecio =
+    config.quietEndHour <= finVentana
+      ? h >= config.quietEndHour && h < finVentana
+      : h >= config.quietEndHour || h < finVentana
+  if (!esHorarioSilencio() && recienAmanecio) {
+    console.log('🌅 Arranque dentro de la franja posterior al horario nocturno: revisando pendientes')
+    responderPendientesNocturnos().catch((err) =>
+      console.error('❌ Error revisando pendientes al arrancar:', err.message),
+    )
+  }
+
+  const t = setInterval(revisar, 60 * 1000)
+  if (t.unref) t.unref()
+  console.log(
+    `🌙 Horario nocturno activo: de ${config.quietStartHour}:00 a ${config.quietEndHour}:00 (hora de Piura). ` +
+      `Ahora son las ${horaLima()}:00 -> Andrea ${esHorarioSilencio() ? 'NO responde' : 'responde'}.`,
+  )
+  return t
 }
 
 // Procesa un evento entrante de Evolution API: lo agrega al buffer del contacto

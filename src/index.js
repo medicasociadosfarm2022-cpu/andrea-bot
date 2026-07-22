@@ -1,6 +1,6 @@
 import express from 'express'
 import { config } from './config.js'
-import { handleIncoming } from './handler.js'
+import { handleIncoming, iniciarProgramadorNocturno } from './handler.js'
 
 const app = express()
 app.use(express.json({ limit: '4mb' }))
@@ -30,4 +30,6 @@ app.listen(config.port, () => {
   console.log(`🚀 Andrea bot escuchando en el puerto ${config.port}`)
   console.log(`   Instancia Evolution: ${config.evolution.instance}`)
   console.log(`   Modelo OpenAI: ${config.openai.model}`)
+  // Vigila el fin del horario nocturno para responder lo que llegó de madrugada.
+  iniciarProgramadorNocturno()
 })

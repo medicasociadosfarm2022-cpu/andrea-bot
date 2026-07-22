@@ -32,6 +32,43 @@ export async function saveMessage(remoteJid, role, content, pushName = null) {
   if (error) console.error('⚠️  Error guardando mensaje en Supabase:', error.message)
 }
 
+// Devuelve las conversaciones que quedaron con la ÚLTIMA palabra del paciente
+// desde `desde` (ISO): es decir, escribió y Andrea nunca le respondió. Se usa al
+// terminar el horario nocturno para contestar lo que llegó de madrugada.
+// No necesita tablas nuevas: se deduce del propio historial de `messages`.
+export async function getConversacionesSinResponder(desde) {
+  const { data, error } = await supabase
+    .from('messages')
+    .select('remote_jid, role, content, push_name, created_at')
+    .gte('created_at', desde)
+    .order('created_at', { ascending: true })
+    .limit(500)
+
+  if (error) {
+    console.error('⚠️  Error leyendo mensajes pendientes de Supabase:', error.message)
+    return []
+  }
+
+  // Agrupar por conversación conservando el orden cronológico.
+  const porChat = new Map()
+  for (const m of data) {
+    let c = porChat.get(m.remote_jid)
+    if (!c) {
+      c = { remoteJid: m.remote_jid, pushName: m.push_name || null, textos: [], ultimoRol: null }
+      porChat.set(m.remote_jid, c)
+    }
+    if (m.push_name) c.pushName = m.push_name
+    // Los textos pendientes son los del paciente posteriores a la última
+    // respuesta de Andrea; si Andrea respondió, se descarta lo anterior.
+    if (m.role === 'user') c.textos.push(m.content)
+    else c.textos = []
+    c.ultimoRol = m.role
+  }
+
+  // Solo interesan las conversaciones donde el último mensaje es del paciente.
+  return [...porChat.values()].filter((c) => c.ultimoRol === 'user' && c.textos.length)
+}
+
 // Pausa una conversación (Andrea deja de responder) hasta la fecha/hora `until`
 // (ISO). Lo usa cuando un paciente pide tratamiento/receta y un humano debe
 // atenderlo. Se guarda en Supabase para que sobreviva a reinicios.
