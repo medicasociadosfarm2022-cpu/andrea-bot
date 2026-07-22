@@ -34,6 +34,12 @@ export const config = {
   // el mismo WhatsApp del consultorio. Por defecto 12 h.
   humanPauseMs: parseInt(process.env.HUMAN_PAUSE_HOURS || '12', 10) * 60 * 60 * 1000,
 
+  // Horas que Andrea queda en pausa cuando el paciente envía una foto, imagen,
+  // audio, video, archivo o un enlace: esos casos los atiende SOLO un humano.
+  // Durante la pausa Andrea tampoco responde los mensajes siguientes de ese
+  // paciente. Por defecto 24 h.
+  mediaPauseMs: parseInt(process.env.MEDIA_PAUSE_HOURS || '24', 10) * 60 * 60 * 1000,
+
   // Minutos de inactividad tras los cuales Andrea envía el mensaje de
   // seguimiento invitando a seguir las redes del Dr. Por defecto 30 min.
   followUpMs: parseInt(process.env.FOLLOWUP_MINUTES || '30', 10) * 60 * 1000,

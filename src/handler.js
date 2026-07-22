@@ -12,9 +12,11 @@ const HANDOFF_TAG = '[DERIVAR]'
 // citas (la cita está en proceso). Sirve para NO enviarle el recontacto.
 const CITA_TAG = '[CITA]'
 
-// Mensaje fijo que Andrea envía al paciente cuando comparte archivos o fotos.
+// Mensaje fijo que Andrea envía al paciente cuando comparte fotos, audios,
+// videos, archivos o enlaces. Tras esto Andrea queda en pausa y solo un humano
+// del consultorio continúa la conversación.
 const AVISO_ADJUNTO =
-  'Gracias por compartir su información 🙏. Le haré llegar su mensaje y sus archivos al Dr. Maraví para que los revise personalmente. Cuando el Dr. me responda, se lo haré saber.'
+  'Gracias por compartir su información 🙏. Le haré llegar su mensaje al Dr. Maraví para que lo revise personalmente. Una persona del consultorio se comunicará con usted. Cuando el Dr. me responda, se lo haré saber.'
 
 // Mensaje que Andrea envía cuando el paciente pide tratamiento/receta/pastillas.
 // Tras esto, Andrea queda en pausa y el personal del consultorio responde.
@@ -178,12 +180,26 @@ function extractText(message) {
   )
 }
 
-// Detecta si el paciente envió un archivo o una foto (PDF, imagen, documento).
+// Detecta si el paciente envió contenido multimedia (foto, audio, video, archivo).
+// Estos casos NO los responde Andrea: los atiende solo un humano.
 function detectarAdjunto(message) {
   if (!message) return null
   if (message.documentMessage || message.documentWithCaptionMessage) return 'un archivo/PDF'
   if (message.imageMessage) return 'una foto/imagen'
+  if (message.audioMessage || message.pttMessage) return 'un audio/nota de voz'
+  if (message.videoMessage) return 'un video'
   return null
+}
+
+// Detecta si el mensaje del paciente contiene un enlace (link). Cubre URLs con
+// http(s)://, las que empiezan con www. y los dominios sueltos más comunes
+// (ejemplo.com, ejemplo.pe...). Los enlaces también pasan a atención humana.
+const REGEX_LINK =
+  /(https?:\/\/\S+|www\.\S+|\b[a-z0-9-]+(?:\.[a-z0-9-]+)*\.(?:com|pe|org|net|edu|gob|es|io|co|app|me|info|link|ly)\b(?:\/\S*)?)/i
+
+function contieneLink(texto) {
+  if (!texto) return false
+  return REGEX_LINK.test(texto)
 }
 
 // Avisa al número humano (Dr. Maraví) para que una persona atienda al paciente.
@@ -262,8 +278,8 @@ export async function handleIncoming(payload) {
   if (number === config.citasNumber) return
 
   const adjunto = detectarAdjunto(data.message)
-  const text = adjunto ? null : extractText(data.message)
-  if (!adjunto && !text) return // mensajes sin texto ni adjunto (audios, stickers, etc.)
+  const text = extractText(data.message) // puede venir como pie de foto/video
+  if (!adjunto && !text) return // mensajes sin contenido útil (stickers, etc.)
 
   // Hay actividad nueva del paciente: cancelar temporizadores pendientes
   // (se reprogramarán cuando Andrea responda).
@@ -272,6 +288,48 @@ export async function handleIncoming(payload) {
   // Si la conversación está en pausa (la atiende un humano), Andrea no responde.
   if (await isPaused(remoteJid)) {
     console.log(`🔕 (en pausa) ${pushName || number}: mensaje ignorado por Andrea`)
+    return
+  }
+
+  // Si el paciente envía multimedia (foto, audio, video, archivo) o un enlace,
+  // Andrea DEJA de responder automáticamente: avisa al número humano y queda en
+  // pausa, de modo que los mensajes que el paciente escriba después tampoco se
+  // responden solos (los atrapa el control de pausa de arriba). Solo un humano
+  // continúa esta conversación.
+  const link = !adjunto && contieneLink(text)
+  if (adjunto || link) {
+    // Descartar cualquier respuesta automática que estuviera pendiente.
+    const pend = buffers.get(remoteJid)
+    if (pend?.timer) clearTimeout(pend.timer)
+    buffers.delete(remoteJid)
+
+    const tipo = adjunto || 'un enlace/link'
+    const motivo = adjunto
+      ? `envió ${tipo}${text ? ` con el mensaje: "${text}"` : ''}`
+      : `envió un enlace/link: "${text}"`
+
+    const hasta = new Date(Date.now() + config.mediaPauseMs).toISOString()
+    await pauseChat(remoteJid, hasta, `envió ${tipo} (requiere atención humana)`)
+    try {
+      await enviar(number, AVISO_ADJUNTO)
+      await notificarHumano(
+        pushName,
+        number,
+        `${motivo}. Andrea quedó en pausa: responda usted directamente al paciente.`,
+      )
+      await saveMessage(
+        remoteJid,
+        'user',
+        `[Paciente envió ${tipo}]${text ? ' ' + text : ''}`,
+        pushName,
+      )
+      await saveMessage(remoteJid, 'assistant', AVISO_ADJUNTO)
+    } catch (err) {
+      console.error('❌ Error derivando multimedia/enlace:', err.message)
+    }
+    console.log(
+      `📎 ${pushName || number}: ${tipo} -> Andrea en pausa ${config.mediaPauseMs / 3600000} h, avisado +${config.handoffNumber}`,
+    )
     return
   }
 
@@ -302,19 +360,15 @@ export async function handleIncoming(payload) {
   }
 
   // Agregar al buffer del contacto.
+  // Llegados aquí solo queda texto sin enlaces: se agrupa y se responde una vez.
   let buf = buffers.get(remoteJid)
   if (!buf) {
-    buf = { number, pushName, texts: [], adjuntos: [], timer: null }
+    buf = { number, pushName, texts: [], timer: null }
     buffers.set(remoteJid, buf)
   }
   buf.pushName = pushName || buf.pushName
-  if (adjunto) {
-    buf.adjuntos.push(adjunto)
-    console.log(`📎 (agrupando) ${pushName || number}: ${adjunto}`)
-  } else {
-    buf.texts.push(text)
-    console.log(`📩 (agrupando) ${pushName || number}: ${text}`)
-  }
+  buf.texts.push(text)
+  console.log(`📩 (agrupando) ${pushName || number}: ${text}`)
 
   // Reiniciar el temporizador: respondemos 60 s después del ÚLTIMO mensaje.
   if (buf.timer) clearTimeout(buf.timer)
@@ -328,28 +382,13 @@ export async function handleIncoming(payload) {
 
 // Procesa todos los mensajes agrupados de un contacto y responde una sola vez.
 async function flushBuffer(remoteJid, buf) {
-  const { number, pushName, texts, adjuntos } = buf
+  const { number, pushName, texts } = buf
 
-  // Si la conversación se pausó mientras había mensajes pendientes, no responder.
+  // Si la conversación se pausó mientras había mensajes pendientes (por ejemplo,
+  // el paciente mandó una foto justo después de escribir), no responder.
   if (await isPaused(remoteJid)) return
 
-  // 1) Si envió algún adjunto (foto/PDF) -> derivar al Dr. Maraví (un solo aviso).
-  if (adjuntos.length) {
-    const tipos = [...new Set(adjuntos)].join(' y ')
-    const textoExtra = texts.length ? ` y escribió: "${texts.join(' ')}"` : ''
-    try {
-      await enviar(number, AVISO_ADJUNTO)
-      await notificarHumano(pushName, number, `envió ${tipos}${textoExtra}`)
-      await saveMessage(remoteJid, 'user', `[Paciente envió ${tipos}]${texts.length ? ' ' + texts.join(' ') : ''}`, pushName)
-      await saveMessage(remoteJid, 'assistant', AVISO_ADJUNTO)
-      console.log(`📎 ${pushName || number}: ${tipos} -> derivado al Dr. Maraví`)
-    } catch (err) {
-      console.error('❌ Error derivando adjunto:', err.message)
-    }
-    return
-  }
-
-  // 2) Solo texto -> juntar todo y responder una vez.
+  // Juntar todo el texto del lote y responder una sola vez.
   const combinado = texts.join('\n')
   if (!combinado) return
 
