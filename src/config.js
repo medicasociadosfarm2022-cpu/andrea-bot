@@ -40,6 +40,12 @@ export const config = {
   // paciente. Por defecto 24 h.
   mediaPauseMs: parseInt(process.env.MEDIA_PAUSE_HOURS || '24', 10) * 60 * 60 * 1000,
 
+  // Horario NOCTURNO en el que Andrea no responde nada al paciente (hora de
+  // Piura). Por defecto de 23:00 (11 p. m.) a 07:00 (7 a. m.). A partir de la
+  // hora de fin vuelve a responder sola.
+  quietStartHour: parseInt(process.env.QUIET_START_HOUR || '23', 10),
+  quietEndHour: parseInt(process.env.QUIET_END_HOUR || '7', 10),
+
   // Minutos de inactividad tras los cuales Andrea envía el mensaje de
   // seguimiento invitando a seguir las redes del Dr. Por defecto 30 min.
   followUpMs: parseInt(process.env.FOLLOWUP_MINUTES || '30', 10) * 60 * 1000,

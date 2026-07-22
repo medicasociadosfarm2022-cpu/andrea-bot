@@ -46,6 +46,32 @@ const TRIGGERS_RECETA = [
   'deme pastilla', 'dame pastilla',
 ]
 
+// Hora actual (0-23) en Piura, Perú. Se calcula con la zona horaria America/Lima
+// para no depender de la hora del servidor, que corre en UTC.
+export function horaLima(ahora = new Date()) {
+  try {
+    const h = new Intl.DateTimeFormat('en-GB', {
+      timeZone: 'America/Lima',
+      hour: '2-digit',
+      hour12: false,
+    }).format(ahora)
+    return parseInt(h, 10) % 24
+  } catch {
+    return ahora.getUTCHours()
+  }
+}
+
+// ¿Estamos en horario nocturno? De 23:00 a 07:00 (hora de Piura) Andrea no
+// responde nada al paciente; a las 07:00 se reactiva sola. El rango cruza la
+// medianoche, por eso la comparación va con "o" en lugar de "y".
+export function esHorarioSilencio(ahora = new Date()) {
+  const h = horaLima(ahora)
+  const inicio = config.quietStartHour
+  const fin = config.quietEndHour
+  if (inicio === fin) return false // rango vacío: silencio desactivado
+  return inicio > fin ? h >= inicio || h < fin : h >= inicio && h < fin
+}
+
 // Normaliza un texto: minúsculas y sin tildes/acentos, para comparar frases.
 function normalizar(texto) {
   return texto
@@ -119,6 +145,7 @@ function cancelarTemporizadores(remoteJid) {
 // Envía el mensaje de redes sociales, salvo que la conversación esté en pausa.
 async function enviarSeguimiento(remoteJid, number) {
   if (await isPaused(remoteJid)) return // un humano la está atendiendo
+  if (esHorarioSilencio()) return // horario nocturno: no molestar
   await enviar(number, MENSAJE_REDES)
   await saveMessage(remoteJid, 'assistant', MENSAJE_REDES)
   console.log(`📣 Seguimiento (redes) enviado a ${number}`)
@@ -128,6 +155,7 @@ async function enviarSeguimiento(remoteJid, number) {
 async function enviarRecontacto(remoteJid, number) {
   if (citasConcertadas.has(remoteJid)) return // ya concretó la cita
   if (await isPaused(remoteJid)) return // un humano la está atendiendo
+  if (esHorarioSilencio()) return // horario nocturno: no molestar
   await enviar(number, MENSAJE_RECONTACTO)
   await saveMessage(remoteJid, 'assistant', MENSAJE_RECONTACTO)
   console.log(`📨 Recontacto enviado a ${number}`)
@@ -311,11 +339,14 @@ export async function handleIncoming(payload) {
     const hasta = new Date(Date.now() + config.mediaPauseMs).toISOString()
     await pauseChat(remoteJid, hasta, `envió ${tipo} (requiere atención humana)`)
     try {
-      await enviar(number, AVISO_ADJUNTO)
+      // De noche no se le escribe al paciente, pero el aviso al personal sí sale.
+      const acusado = !esHorarioSilencio()
+      if (acusado) await enviar(number, AVISO_ADJUNTO)
       await notificarHumano(
         pushName,
         number,
-        `${motivo}. Andrea quedó en pausa: responda usted directamente al paciente.`,
+        `${motivo}. Andrea quedó en pausa: responda usted directamente al paciente.` +
+          (acusado ? '' : ' (Llegó de madrugada: Andrea NO le respondió nada.)'),
       )
       await saveMessage(
         remoteJid,
@@ -323,7 +354,7 @@ export async function handleIncoming(payload) {
         `[Paciente envió ${tipo}]${text ? ' ' + text : ''}`,
         pushName,
       )
-      await saveMessage(remoteJid, 'assistant', AVISO_ADJUNTO)
+      if (acusado) await saveMessage(remoteJid, 'assistant', AVISO_ADJUNTO)
     } catch (err) {
       console.error('❌ Error derivando multimedia/enlace:', err.message)
     }
@@ -344,14 +375,17 @@ export async function handleIncoming(payload) {
     const hasta = new Date(Date.now() + config.pauseMs).toISOString()
     await pauseChat(remoteJid, hasta, 'pidió tratamiento/receta/pastillas')
     try {
-      await enviar(number, AVISO_RECETA)
+      // De noche no se le escribe al paciente, pero el aviso al personal sí sale.
+      const acusado = !esHorarioSilencio()
+      if (acusado) await enviar(number, AVISO_RECETA)
       await notificarHumano(
         pushName,
         number,
-        `solicitó tratamiento/receta/pastillas: "${text}". Andrea quedó en pausa por atención humana.`,
+        `solicitó tratamiento/receta/pastillas: "${text}". Andrea quedó en pausa por atención humana.` +
+          (acusado ? '' : ' (Llegó de madrugada: Andrea NO le respondió nada.)'),
       )
       await saveMessage(remoteJid, 'user', text, pushName)
-      await saveMessage(remoteJid, 'assistant', AVISO_RECETA)
+      if (acusado) await saveMessage(remoteJid, 'assistant', AVISO_RECETA)
     } catch (err) {
       console.error('❌ Error derivando solicitud de receta:', err.message)
     }
@@ -360,6 +394,19 @@ export async function handleIncoming(payload) {
   }
 
   // Agregar al buffer del contacto.
+  // Horario nocturno (23:00-07:00 en Piura): Andrea no responde. El mensaje se
+  // guarda en el historial para que quede constancia, pero no se agrupa ni se
+  // contesta. A las 07:00 vuelve a responder sola los mensajes nuevos.
+  if (esHorarioSilencio()) {
+    console.log(`🌙 (horario nocturno, ${horaLima()}:00 en Piura) ${pushName || number}: sin respuesta automática`)
+    try {
+      await saveMessage(remoteJid, 'user', text, pushName)
+    } catch (err) {
+      console.error('⚠️  No se pudo guardar el mensaje nocturno:', err.message)
+    }
+    return
+  }
+
   // Llegados aquí solo queda texto sin enlaces: se agrupa y se responde una vez.
   let buf = buffers.get(remoteJid)
   if (!buf) {
@@ -387,6 +434,13 @@ async function flushBuffer(remoteJid, buf) {
   // Si la conversación se pausó mientras había mensajes pendientes (por ejemplo,
   // el paciente mandó una foto justo después de escribir), no responder.
   if (await isPaused(remoteJid)) return
+
+  // Si entró el horario nocturno mientras se agrupaban los mensajes (escribió a
+  // las 22:59 y el lote vencía a las 23:00), tampoco responder.
+  if (esHorarioSilencio()) {
+    console.log(`🌙 (entró horario nocturno) ${pushName || number}: lote descartado sin responder`)
+    return
+  }
 
   // Juntar todo el texto del lote y responder una sola vez.
   const combinado = texts.join('\n')
