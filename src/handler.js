@@ -78,6 +78,71 @@ export function esHorarioSilencio(ahora = new Date()) {
   return inicio > fin ? h >= inicio || h < fin : h >= inicio && h < fin
 }
 
+// Fecha de hoy (YYYY-MM-DD) en Piura, Perú, con la zona America/Lima, para no
+// depender de la hora del servidor (corre en UTC).
+export function fechaHoyLima(ahora = new Date()) {
+  try {
+    // 'en-CA' entrega el formato ISO YYYY-MM-DD.
+    return new Intl.DateTimeFormat('en-CA', {
+      timeZone: 'America/Lima',
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+    }).format(ahora)
+  } catch {
+    return ahora.toISOString().slice(0, 10)
+  }
+}
+
+// ¿Hoy es día feriado (el Dr. está de viaje y no atiende)? Compara la fecha de
+// Piura contra la lista `config.feriadoDates`.
+export function esDiaFeriado(ahora = new Date()) {
+  return config.feriadoDates.includes(fechaHoyLima(ahora))
+}
+
+// Convierte una fecha 'YYYY-MM-DD' en un texto legible en español: "28 de julio".
+const MESES_ES = [
+  'enero', 'febrero', 'marzo', 'abril', 'mayo', 'junio',
+  'julio', 'agosto', 'septiembre', 'octubre', 'noviembre', 'diciembre',
+]
+function fechaLegible(iso) {
+  const [, mes, dia] = iso.split('-').map((n) => parseInt(n, 10))
+  return `${dia} de ${MESES_ES[mes - 1] || ''}`.trim()
+}
+
+// Lista de fechas legible en español. Si todas caen en el mismo mes, no lo
+// repite: "28 y 29 de julio". Si no, escribe el mes en cada una.
+function listaFechasLegible(fechas) {
+  if (!fechas.length) return ''
+  const meses = new Set(fechas.map((f) => f.split('-')[1]))
+  const partes =
+    meses.size === 1
+      ? fechas.map((f) => parseInt(f.split('-')[2], 10)).map(String) // solo el día
+      : fechas.map(fechaLegible) // día y mes en cada una
+  let texto =
+    partes.length > 1
+      ? `${partes.slice(0, -1).join(', ')} y ${partes[partes.length - 1]}`
+      : partes[0]
+  if (meses.size === 1) {
+    const mes = parseInt([...meses][0], 10)
+    texto += ` de ${MESES_ES[mes - 1] || ''}`
+  }
+  return texto.trim()
+}
+
+// Aviso que Andrea envía durante los días feriados. Menciona los días sin
+// atención y la fecha de reinicio a partir de `config`.
+function mensajeFeriado() {
+  const listaDias = listaFechasLegible(config.feriadoDates)
+  const reinicio = fechaLegible(config.feriadoReinicio)
+  return (
+    'Hola 😊, gracias por escribir al consultorio del Dr. Julio Maraví. ' +
+    `Le informo que por feriados el Dr. no atenderá el ${listaDias}, ya que se encuentra de viaje. 🙏\n\n` +
+    'Con gusto puede dejarme su mensaje y se lo haré llegar para que el Dr. le responda ' +
+    `el ${reinicio}, cuando reinicia sus actividades. ¡Gracias por su comprensión! 🙌`
+  )
+}
+
 // Normaliza un texto: minúsculas y sin tildes/acentos, para comparar frases.
 function normalizar(texto) {
   return texto
@@ -282,6 +347,13 @@ const INSTRUCCION_NOCTURNA =
   '[NOTA INTERNA: el paciente escribió esto de madrugada, fuera del horario de atención, y recién le estás respondiendo ahora en la mañana. Salúdalo, discúlpate brevemente por la demora en una sola frase y responde su consulta con normalidad. No menciones esta nota.]\n\n'
 
 async function responderPendientesNocturnos() {
+  // En día feriado el Dr. no atiende: no se generan respuestas automáticas de la
+  // madrugada. Cuando el paciente vuelva a escribir recibirá el aviso de feriado.
+  if (esDiaFeriado()) {
+    console.log('🏖️ Feriado: no se generan respuestas automáticas de la madrugada.')
+    return
+  }
+
   let chats = []
   try {
     // Buscamos desde el inicio del horario nocturno (con 1 h de margen).
@@ -433,6 +505,50 @@ export async function handleIncoming(payload) {
   // Si la conversación está en pausa (la atiende un humano), Andrea no responde.
   if (await isPaused(remoteJid)) {
     console.log(`🔕 (en pausa) ${pushName || number}: mensaje ignorado por Andrea`)
+    return
+  }
+
+  // Días FERIADOS (el Dr. está de viaje): Andrea NO atiende ninguna consulta,
+  // venga como texto, imagen o audio. Guarda el mensaje del paciente para que el
+  // Dr. lo lea al reiniciar, y responde una sola vez con el aviso del feriado
+  // (no lo repite en cada mensaje del mismo chat).
+  if (esDiaFeriado()) {
+    // Cancelar cualquier respuesta agrupada o seguimiento que estuviera pendiente.
+    const pend = buffers.get(remoteJid)
+    if (pend?.timer) clearTimeout(pend.timer)
+    buffers.delete(remoteJid)
+    cancelarTemporizadores(remoteJid)
+
+    const aviso = mensajeFeriado()
+    try {
+      // ¿Ya le enviamos el aviso de feriado en este chat? Lo comprobamos en el
+      // historial para no reenviarlo en cada mensaje.
+      const history = await getHistory(remoteJid)
+      const yaAvisado = history.some(
+        (m) => m.role === 'assistant' && m.content === aviso,
+      )
+
+      // Guardar lo que envió el paciente (texto o descripción del adjunto) para
+      // que el Dr. lo revise el día de reinicio.
+      const contenido = adjunto
+        ? `[Paciente envió ${adjunto}]${text ? ' ' + text : ''}`
+        : text
+      await saveMessage(remoteJid, 'user', contenido, pushName)
+
+      // El aviso respeta el horario nocturno: de madrugada no se le escribe nada.
+      if (!yaAvisado && !esHorarioSilencio()) {
+        await enviar(number, aviso)
+        await saveMessage(remoteJid, 'assistant', aviso)
+        console.log(`🏖️ (feriado ${fechaHoyLima()}) aviso enviado a ${pushName || number}`)
+      } else {
+        console.log(
+          `🏖️ (feriado ${fechaHoyLima()}) ${pushName || number}: mensaje guardado, ` +
+            `${yaAvisado ? 'aviso ya enviado antes' : 'horario nocturno'}, sin reenviar`,
+        )
+      }
+    } catch (err) {
+      console.error('❌ Error en modo feriado:', err.message)
+    }
     return
   }
 

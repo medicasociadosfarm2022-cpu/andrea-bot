@@ -46,6 +46,20 @@ export const config = {
   quietStartHour: parseInt(process.env.QUIET_START_HOUR || '23', 10),
   quietEndHour: parseInt(process.env.QUIET_END_HOUR || '7', 10),
 
+  // Días FERIADOS en los que el consultorio NO atiende porque el Dr. está de
+  // viaje. Fechas de Piura en formato YYYY-MM-DD separadas por comas. En esos
+  // días Andrea no responde consultas (ni textos, ni imágenes, ni audios):
+  // guarda el mensaje del paciente para el Dr. y avisa que retomará el día de
+  // reinicio. Dejar vacío para desactivar el modo feriado.
+  feriadoDates: (process.env.FERIADO_DATES || '2026-07-28,2026-07-29')
+    .split(',')
+    .map((s) => s.trim())
+    .filter(Boolean),
+
+  // Fecha (YYYY-MM-DD, hora de Piura) en la que el Dr. reinicia sus actividades
+  // tras el feriado. Se menciona en el aviso que Andrea envía esos días.
+  feriadoReinicio: (process.env.FERIADO_REINICIO || '2026-07-30').trim(),
+
   // Minutos de inactividad tras los cuales Andrea envía el mensaje de
   // seguimiento invitando a seguir las redes del Dr. Por defecto 30 min.
   followUpMs: parseInt(process.env.FOLLOWUP_MINUTES || '30', 10) * 60 * 1000,
