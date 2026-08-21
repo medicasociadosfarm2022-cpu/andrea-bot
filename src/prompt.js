@@ -75,6 +75,22 @@ const PROMO_TEXTO = `# PROMOCIÓN VIGENTE (campaña por el mes de julio, válida
 - El descuento aplica ÚNICAMENTE a esos cuatro servicios. Para cualquier OTRO procedimiento (cápsula endoscópica, polipectomía, balón intragástrico, etc.) NO hay descuento y el costo sigue siendo previa evaluación.
 - No prometas que la promoción se extenderá; si preguntan hasta cuándo, di que es por el mes de julio.`
 
+// --- Aviso temporal: Dr. de capacitación ---
+// Este bloque se añade al guion a partir de CAPACITACION_DESDE. No tiene fecha de
+// fin todavía porque el regreso exacto está por confirmar (primera semana de
+// setiembre 2026). Cuando se confirme la fecha, actualizar el texto o, si ya
+// pasó, borrar este bloque y su uso en buildSystemPrompt().
+const CAPACITACION_DESDE = '2026-08-24'
+
+const CAPACITACION_TEXTO = `# AVISO VIGENTE: Dr. Maraví de capacitación (desde el 24 de agosto de 2026)
+- Cuando el paciente pregunte por agendar una CONSULTA o cualquier PROCEDIMIENTO endoscópico (endoscopía, colonoscopía, test de aliento, etc.), infórmale que el Dr. Maraví no estará atendiendo hasta la primera semana de setiembre (fecha exacta aún por confirmar), ya que se encuentra en una capacitación.
+- Si aun así el paciente desea separar un turno a partir de esa fecha, derívalo con la encargada de citas siguiendo el flujo normal (pídele nombres y apellidos completos si no los tienes ya), aclarando que la atención se retomará en la primera semana de setiembre.
+- Este aviso solo aplica a preguntas sobre consulta o procedimientos; no lo repitas si el paciente pregunta otra cosa (horario general, dirección, etc. — en ese caso responde normal).`
+
+function capacitacionVigente(ahora = new Date()) {
+  return fechaHoyLima(ahora) >= CAPACITACION_DESDE
+}
+
 // Fecha de hoy en Piura como 'YYYY-MM-DD' (América/Lima), para comparar sin líos de zona horaria.
 export function fechaHoyLima(ahora = new Date()) {
   try {
@@ -113,5 +129,6 @@ export function buildSystemPrompt() {
     ahora = new Date().toISOString()
   }
   const promo = promoVigente() ? `\n\n${PROMO_TEXTO}` : ''
-  return `${SYSTEM_PROMPT}${promo}\n\n# Contexto temporal\nFecha y hora actual en Piura, Perú: ${ahora}. Usa este dato para saber si el consultorio está en horario de atención.`
+  const capacitacion = capacitacionVigente() ? `\n\n${CAPACITACION_TEXTO}` : ''
+  return `${SYSTEM_PROMPT}${promo}${capacitacion}\n\n# Contexto temporal\nFecha y hora actual en Piura, Perú: ${ahora}. Usa este dato para saber si el consultorio está en horario de atención.`
 }
